@@ -1,0 +1,35 @@
+spring:
+  application:
+    name: event-gateway-test
+  datasource:
+    url: jdbc:h2:mem:testgatewaydb;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+
+account-service:
+  url: http://localhost:9999
+
+management:
+  tracing:
+    sampling:
+      probability: 1.0
+  otlp:
+    tracing:
+      endpoint: http://localhost:4318/v1/traces
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      accountService:
+        slidingWindowSize: 3
+        minimumNumberOfCalls: 2
+        failureRateThreshold: 50
+        waitDurationInOpenState: 2s
+        permittedNumberOfCallsInHalfOpenState: 1
+  retry:
+    instances:
+      accountService:
+        maxAttempts: 1
+        waitDuration: 100ms

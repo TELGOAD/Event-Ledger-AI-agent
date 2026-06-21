@@ -1,0 +1,17 @@
+spring:
+  application:
+    name: account-service-test
+  datasource:
+    url: jdbc:h2:mem:testaccountdb;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+
+management:
+  tracing:
+    sampling:
+      probability: 1.0
+  otlp:
+    tracing:
+      endpoint: http://localhost:4318/v1/traces
