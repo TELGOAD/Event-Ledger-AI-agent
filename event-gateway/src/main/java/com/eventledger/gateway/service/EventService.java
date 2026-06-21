@@ -3,7 +3,10 @@ package com.eventledger.gateway.service;
 import com.eventledger.gateway.model.Event;
 import com.eventledger.gateway.model.EventRequest;
 import com.eventledger.gateway.model.EventResponse;
+import com.eventledger.gateway.model.PendingEvent;
 import com.eventledger.gateway.repository.EventRepository;
+import com.eventledger.gateway.repository.PendingEventRepository;
+import com.eventledger.gateway.service.AccountServiceClient.AccountServiceUnavailableException;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -22,11 +25,14 @@ public class EventService {
     private static final Logger log = LoggerFactory.getLogger(EventService.class);
     private final EventRepository eventRepository;
     private final AccountServiceClient accountServiceClient;
+    private final PendingEventRepository pendingEventRepository;
     private final ObjectMapper objectMapper;
 
-    public EventService(EventRepository eventRepository, AccountServiceClient accountServiceClient, ObjectMapper objectMapper) {
+    public EventService(EventRepository eventRepository, AccountServiceClient accountServiceClient,
+                        PendingEventRepository pendingEventRepository, ObjectMapper objectMapper) {
         this.eventRepository = eventRepository;
         this.accountServiceClient = accountServiceClient;
+        this.pendingEventRepository = pendingEventRepository;
         this.objectMapper = objectMapper;
     }
 
@@ -40,10 +46,6 @@ public class EventService {
             return new CreateEventResult(toResponse(existing.get()), true);
         }
 
-        // Call Account Service (may throw AccountServiceUnavailableException)
-        accountServiceClient.applyTransaction(request.accountId(), request);
-
-        // Store locally
         String metadataJson = null;
         if (request.metadata() != null) {
             try {
@@ -53,19 +55,28 @@ public class EventService {
             }
         }
 
-        Event event = new Event(
-            request.eventId(),
-            request.accountId(),
-            request.type(),
-            request.amount(),
-            request.currency(),
-            Instant.parse(request.eventTimestamp()),
-            metadataJson
-        );
-        eventRepository.save(event);
-        log.info("Event stored: eventId={}, accountId={}", request.eventId(), request.accountId());
+        try {
+            // Call Account Service
+            accountServiceClient.applyTransaction(request.accountId(), request);
 
-        return new CreateEventResult(toResponse(event), false);
+            // Store locally on success
+            Event event = new Event(request.eventId(), request.accountId(), request.type(),
+                request.amount(), request.currency(), Instant.parse(request.eventTimestamp()), metadataJson);
+            eventRepository.save(event);
+            log.info("Event stored: eventId={}, accountId={}", request.eventId(), request.accountId());
+            return new CreateEventResult(toResponse(event), false);
+
+        } catch (AccountServiceUnavailableException e) {
+            // Async fallback: queue locally for later processing
+            try {
+                String payload = objectMapper.writeValueAsString(request);
+                pendingEventRepository.save(new PendingEvent(payload, request.accountId()));
+                log.warn("Event queued for retry: eventId={}", request.eventId());
+            } catch (JsonProcessingException ex) {
+                log.error("Failed to queue event: {}", ex.getMessage());
+            }
+            throw e;
+        }
     }
 
     public Optional<EventResponse> getEvent(String eventId) {
@@ -92,15 +103,9 @@ public class EventService {
             }
         }
         return new EventResponse(
-            event.getEventId(),
-            event.getAccountId(),
-            event.getType(),
-            event.getAmount(),
-            event.getCurrency(),
-            event.getEventTimestamp().toString(),
-            metadata,
-            event.getStatus(),
-            event.getCreatedAt().toString()
+            event.getEventId(), event.getAccountId(), event.getType(),
+            event.getAmount(), event.getCurrency(), event.getEventTimestamp().toString(),
+            metadata, event.getStatus(), event.getCreatedAt().toString()
         );
     }
 }

@@ -6,14 +6,18 @@ import com.eventledger.gateway.service.AccountServiceClient;
 import com.eventledger.gateway.service.AccountServiceClient.AccountServiceUnavailableException;
 import com.eventledger.gateway.service.EventService;
 import com.eventledger.gateway.service.EventService.CreateEventResult;
+import com.eventledger.gateway.service.PendingEventProcessor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import javax.sql.DataSource;
 import java.math.BigDecimal;
+import java.sql.Connection;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -23,15 +27,19 @@ public class EventController {
     private static final Logger log = LoggerFactory.getLogger(EventController.class);
     private final EventService eventService;
     private final AccountServiceClient accountServiceClient;
+    private final PendingEventProcessor pendingEventProcessor;
+    private final DataSource dataSource;
 
-    public EventController(EventService eventService, AccountServiceClient accountServiceClient) {
+    public EventController(EventService eventService, AccountServiceClient accountServiceClient,
+                           PendingEventProcessor pendingEventProcessor, DataSource dataSource) {
         this.eventService = eventService;
         this.accountServiceClient = accountServiceClient;
+        this.pendingEventProcessor = pendingEventProcessor;
+        this.dataSource = dataSource;
     }
 
     @PostMapping("/events")
     public ResponseEntity<?> createEvent(@RequestBody EventRequest request) {
-        // Validation
         String validationError = validate(request);
         if (validationError != null) {
             return ResponseEntity.badRequest().body(Map.of("error", validationError));
@@ -44,9 +52,13 @@ public class EventController {
             }
             return ResponseEntity.status(HttpStatus.CREATED).body(result.response());
         } catch (AccountServiceUnavailableException e) {
-            log.error("Account Service unavailable during event creation: {}", e.getMessage());
-            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                .body(Map.of("error", "Account Service unavailable", "detail", e.getMessage()));
+            log.error("Account Service unavailable: {}", e.getMessage());
+            Map<String, Object> body = new HashMap<>();
+            body.put("error", "Account Service unavailable");
+            body.put("detail", e.getMessage());
+            body.put("queued", true);
+            body.put("message", "Event queued and will be processed when Account Service recovers");
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(body);
         }
     }
 
@@ -76,10 +88,17 @@ public class EventController {
 
     @GetMapping("/health")
     public ResponseEntity<Map<String, Object>> health() {
-        return ResponseEntity.ok(Map.of(
-            "status", "healthy",
-            "service", "event-gateway"
-        ));
+        Map<String, Object> response = new HashMap<>();
+        response.put("status", "healthy");
+        response.put("service", "event-gateway");
+        response.put("pendingEvents", pendingEventProcessor.getPendingCount());
+
+        try (Connection conn = dataSource.getConnection()) {
+            response.put("database", Map.of("status", "connected", "url", conn.getMetaData().getURL()));
+        } catch (Exception e) {
+            response.put("database", Map.of("status", "disconnected", "error", e.getMessage()));
+        }
+        return ResponseEntity.ok(response);
     }
 
     private String validate(EventRequest request) {

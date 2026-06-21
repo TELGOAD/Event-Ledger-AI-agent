@@ -8,6 +8,9 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.util.HashMap;
 import java.util.Map;
 
 @RestController
@@ -15,9 +18,11 @@ public class AccountController {
 
     private static final Logger log = LoggerFactory.getLogger(AccountController.class);
     private final AccountService accountService;
+    private final DataSource dataSource;
 
-    public AccountController(AccountService accountService) {
+    public AccountController(AccountService accountService, DataSource dataSource) {
         this.accountService = accountService;
+        this.dataSource = dataSource;
     }
 
     @PostMapping("/accounts/{accountId}/transactions")
@@ -42,9 +47,15 @@ public class AccountController {
 
     @GetMapping("/health")
     public ResponseEntity<Map<String, Object>> health() {
-        return ResponseEntity.ok(Map.of(
-            "status", "healthy",
-            "service", "account-service"
-        ));
+        Map<String, Object> response = new HashMap<>();
+        response.put("status", "healthy");
+        response.put("service", "account-service");
+
+        try (Connection conn = dataSource.getConnection()) {
+            response.put("database", Map.of("status", "connected", "url", conn.getMetaData().getURL()));
+        } catch (Exception e) {
+            response.put("database", Map.of("status", "disconnected", "error", e.getMessage()));
+        }
+        return ResponseEntity.ok(response);
     }
 }
